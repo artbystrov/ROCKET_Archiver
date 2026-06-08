@@ -12,6 +12,7 @@ datas = [
 
 hiddenimports = [
     "archiver_core",
+    "extract_ui",
     "windows_assoc",
     "updater",
     "requests",
@@ -42,7 +43,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="ROCKET_Archiver_v1.0",
+    name="ROCKET_Archiver_v1.1",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

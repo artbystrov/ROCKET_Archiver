@@ -14,11 +14,12 @@ from tkinter import filedialog, messagebox, ttk
 from archiver_core import (
     SUPPORTED_EXTRACT_EXTENSIONS,
     create_zip,
-    extract_archive,
     find_7z_path,
+    find_icon_path,
     is_supported_archive,
     open_in_explorer,
 )
+from extract_ui import ExtractProgressDialog, extract_with_progress
 from windows_assoc import (
     association_status,
     open_default_apps_settings,
@@ -26,20 +27,9 @@ from windows_assoc import (
     unregister_associations,
 )
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 GITHUB_REPO_URL = "https://github.com/artbystrov/ROCKET_Archiver"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or None
-
-
-def find_icon_path() -> str | None:
-    from archiver_core import app_search_roots
-
-    for root in app_search_roots():
-        for name in ("Icon.ico", "icon.ico"):
-            candidate = root / "img" / name
-            if candidate.exists():
-                return str(candidate)
-    return None
 
 
 class ArchiverApp:
@@ -245,7 +235,7 @@ class ArchiverApp:
             filetypes=[("Архивы", exts), ("Все файлы", "*.*")],
         )
         if path:
-            self._run_extract(Path(path), show_success=True)
+            self._run_extract(Path(path))
 
     def _pick_and_compress(self, pick_dir: bool = False) -> None:
         if pick_dir:
@@ -277,14 +267,8 @@ class ArchiverApp:
         except Exception as exc:
             messagebox.showerror("Ошибка", str(exc))
 
-    def _run_extract(self, archive: Path, show_success: bool = False) -> None:
-        try:
-            out_dir = extract_archive(archive)
-            open_in_explorer(out_dir)
-            if show_success:
-                messagebox.showinfo("Готово", f"Распаковано в:\n{out_dir}")
-        except Exception as exc:
-            messagebox.showerror("Ошибка распаковки", str(exc))
+    def _run_extract(self, archive: Path) -> None:
+        ExtractProgressDialog(archive, parent=self.root).run()
 
 
 def _archive_from_argv(argv: list[str]) -> Path | None:
@@ -298,17 +282,8 @@ def _archive_from_argv(argv: list[str]) -> Path | None:
 
 
 def quick_extract(archive: Path) -> int:
-    """Режим двойного клика: без GUI, открыть папку в Проводнике."""
-    try:
-        out_dir = extract_archive(archive)
-        open_in_explorer(out_dir)
-        return 0
-    except Exception as exc:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("ROCKET Archiver", str(exc))
-        root.destroy()
-        return 1
+    """Режим двойного клика: окно прогресса, папка рядом с архивом."""
+    return extract_with_progress(archive)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -340,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     root = tk.Tk()
     app = ArchiverApp(root)
     if archive:
-        threading.Thread(target=app._run_extract, args=(archive, False), daemon=True).start()
+        root.after(100, lambda: app._run_extract(archive))
 
     if app.updater is not None:
 

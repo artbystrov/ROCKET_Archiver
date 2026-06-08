@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 # Форматы, которые открываем по двойному клику и в GUI.
@@ -45,6 +47,17 @@ COMPOUND_EXTENSIONS = (
     ".tar.xz",
     ".tar.z",
 )
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def find_icon_path() -> str | None:
+    for root in app_search_roots():
+        for name in ("Icon.ico", "icon.ico"):
+            candidate = root / "img" / name
+            if candidate.exists():
+                return str(candidate)
+    return None
 
 
 def app_search_roots() -> list[Path]:
@@ -126,6 +139,7 @@ def unique_output_dir(parent: Path, base_name: str) -> Path:
 
 
 def default_extract_dir(archive_path: Path) -> Path:
+    """Папка с именем архива в той же директории, что и файл."""
     archive_path = archive_path.resolve()
     stem = archive_path.stem
     for ext in COMPOUND_EXTENSIONS:
@@ -135,29 +149,77 @@ def default_extract_dir(archive_path: Path) -> Path:
     return unique_output_dir(archive_path.parent, stem)
 
 
-def _run_7z_extract(tool_path: str, archive_path: Path, target_dir: Path) -> None:
+def _notify_progress(
+    progress_callback: ProgressCallback | None,
+    percent: float,
+    message: str = "",
+) -> None:
+    if progress_callback:
+        progress_callback(percent, message)
+
+
+def _extract_zip(
+    archive_path: Path,
+    target_dir: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        members = [m for m in zf.infolist() if not m.is_dir()]
+        total = max(len(members), 1)
+        _notify_progress(progress_callback, 0, "Чтение ZIP…")
+        for index, member in enumerate(members, start=1):
+            zf.extract(member, target_dir)
+            name = Path(member.filename).name or member.filename
+            percent = index / total * 100
+            _notify_progress(progress_callback, percent, name)
+
+
+def _run_7z_extract(
+    tool_path: str,
+    archive_path: Path,
+    target_dir: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         tool_path,
         "x",
         "-y",
+        "-bsp1",
+        "-bb1",
         f"-o{target_dir}",
         str(archive_path),
     ]
-    result = subprocess.run(
+    _notify_progress(progress_callback, 0, "Распаковка…")
+
+    process = subprocess.Popen(
         cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "неизвестная ошибка").strip()
-        raise RuntimeError(f"Ошибка распаковки: {err}")
+
+    percent = 0.0
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.decode("utf-8", errors="replace")
+        matches = re.findall(r"(\d+)\s*%", line)
+        if matches:
+            percent = float(matches[-1])
+            _notify_progress(progress_callback, percent, "Распаковка…")
+
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError("Ошибка распаковки 7-Zip.")
+
+    _notify_progress(progress_callback, max(percent, 100.0), "Готово")
 
 
-def extract_archive(archive_path: Path | str, target_dir: Path | str | None = None) -> Path:
+def extract_archive(
+    archive_path: Path | str,
+    target_dir: Path | str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     archive_path = Path(archive_path).resolve()
     if not archive_path.is_file():
         raise FileNotFoundError(f"Архив не найден: {archive_path}")
@@ -169,8 +231,7 @@ def extract_archive(archive_path: Path | str, target_dir: Path | str | None = No
 
     ext = archive_extension(archive_path)
     if ext == ".zip":
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(out_dir)
+        _extract_zip(archive_path, out_dir, progress_callback)
         return out_dir
 
     tool_path = find_7z_path()
@@ -178,7 +239,7 @@ def extract_archive(archive_path: Path | str, target_dir: Path | str | None = No
         raise RuntimeError(
             "Для этого формата нужен 7-Zip (7z.exe в папке bin или в PATH)."
         )
-    _run_7z_extract(tool_path, archive_path, out_dir)
+    _run_7z_extract(tool_path, archive_path, out_dir, progress_callback)
     return out_dir
 
 

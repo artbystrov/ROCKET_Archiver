@@ -15,7 +15,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo Готово: dist\ROCKET_Archiver_v1.0.exe
+echo Готово: dist\ROCKET_Archiver_v1.1.exe
 echo Внутри упакованы bin\7z.exe и img\Icon.ico.
 echo.
 echo После установки: запустите exe, вкладка «По умолчанию» — зарегистрируйте ассоциации.
