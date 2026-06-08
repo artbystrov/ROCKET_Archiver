@@ -43,7 +43,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="ROCKET_Archiver_v1.1",
+    name="ROCKET_Archiver_v1.1.1",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

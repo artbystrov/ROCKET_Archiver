@@ -27,7 +27,7 @@ from windows_assoc import (
     unregister_associations,
 )
 
-APP_VERSION = "1.1"
+APP_VERSION = "1.1.1"
 GITHUB_REPO_URL = "https://github.com/artbystrov/ROCKET_Archiver"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or None
 

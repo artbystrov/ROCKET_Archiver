@@ -241,41 +241,116 @@ class Updater:
                         self.update_window.update_idletasks()
 
             self._create_update_script(download_path)
-            sys.exit(0)
+            os._exit(0)
 
         except Exception as e:
             messagebox.showerror("Ошибка обновления", str(e))
 
+    @staticmethod
+    def _resolve_running_exe():
+        """Путь к запущенному exe (для PyInstaller надёжнее sys.executable, чем argv[0])."""
+        if getattr(sys, "frozen", False):
+            return os.path.abspath(sys.executable)
+        return os.path.abspath(sys.argv[0])
+
+    @staticmethod
+    def _windows_desktop_dir():
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+                if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0 and buf.value:
+                    return buf.value
+            except Exception:
+                pass
+        return os.path.join(os.path.expanduser("~"), "Desktop")
+
+    @staticmethod
+    def _cmd_path(path):
+        return os.path.abspath(path).replace("\\", "/")
+
     def _create_update_script(self, downloaded_file):
-        old_exe = os.path.abspath(sys.argv[0])
-        app_dir = os.path.dirname(old_exe)
+        target_exe = self._resolve_running_exe()
+        app_dir = os.path.dirname(target_exe)
         temp_dir = os.path.dirname(downloaded_file)
-        new_exe = downloaded_file
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        shortcut_name = self.desktop_shortcut_name
+        desktop = self._windows_desktop_dir()
         update_bat = os.path.join(temp_dir, "update.bat")
+        exe_name = os.path.basename(target_exe)
+
+        new_exe = self._cmd_path(downloaded_file)
+        target = self._cmd_path(target_exe)
+        staging = self._cmd_path(target_exe + ".new")
+        work_dir = self._cmd_path(app_dir)
+        desktop_path = self._cmd_path(desktop)
+        temp = self._cmd_path(temp_dir)
+        shortcut_path = f"{desktop_path}/{self.desktop_shortcut_name}"
 
         with open(update_bat, "w", encoding="utf-8") as f:
             f.write(
                 f"""@echo off
+setlocal EnableDelayedExpansion
 chcp 65001 > nul
 echo Обновление {self.app_label}...
+echo Установка в: {target}
 
-set NEW_EXE="{new_exe}"
-set TARGET_DIR="{app_dir}"
-set DESKTOP="{desktop}"
+set "NEW_EXE={new_exe}"
+set "TARGET_EXE={target}"
+set "STAGING_EXE={staging}"
+set "APP_DIR={work_dir}"
+set "SHORTCUT={shortcut_path}"
 
-del "%DESKTOP%\\{shortcut_name}" > nul 2>&1
-move /Y %NEW_EXE% "%TARGET_DIR%\\"
-powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%DESKTOP%\\{shortcut_name}');$s.TargetPath='%TARGET_DIR%\\{os.path.basename(new_exe)}';$s.WorkingDirectory='%TARGET_DIR%';$s.Save()"
-start "" "%TARGET_DIR%\\{os.path.basename(new_exe)}"
-timeout /t 3 > nul
-del "{old_exe}" > nul 2>&1
-rmdir /s /q "{temp_dir}"
+timeout /t 2 /nobreak > nul
+
+set /a ATTEMPTS=0
+:retry_copy
+set /a ATTEMPTS+=1
+if !ATTEMPTS! gtr 20 goto copy_failed
+
+del "%STAGING_EXE%" > nul 2>&1
+copy /Y "%NEW_EXE%" "%STAGING_EXE%" > nul 2>&1
+if not exist "%STAGING_EXE%" goto wait_retry
+
+for %%F in ("%NEW_EXE%") do set SRC_SIZE=%%~zF
+for %%F in ("%STAGING_EXE%") do set DST_SIZE=%%~zF
+if not !SRC_SIZE! equ !DST_SIZE! (
+    del "%STAGING_EXE%" > nul 2>&1
+    goto wait_retry
+)
+
+move /Y "%STAGING_EXE%" "%TARGET_EXE%" > nul 2>&1
+if not exist "%TARGET_EXE%" goto wait_retry
+
+for %%F in ("%TARGET_EXE%") do set FINAL_SIZE=%%~zF
+if not !SRC_SIZE! equ !FINAL_SIZE! goto wait_retry
+goto copy_ok
+
+:wait_retry
+if !ATTEMPTS! equ 5 taskkill /f /im "{exe_name}" > nul 2>&1
+timeout /t 2 /nobreak > nul
+goto retry_copy
+
+:copy_failed
+echo.
+echo Не удалось установить обновление.
+echo Новая версия сохранена здесь: %NEW_EXE%
+echo Файл программы должен быть здесь: %TARGET_EXE%
+echo Старая версия не удалена.
+echo.
+pause
+exit /b 1
+
+:copy_ok
+del "%SHORTCUT%" > nul 2>&1
+powershell -NoProfile -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT%');$s.TargetPath='%TARGET_EXE%';$s.WorkingDirectory='%APP_DIR%';$s.Save()"
+start "" "%TARGET_EXE%"
+timeout /t 2 /nobreak > nul
+rmdir /s /q "{temp}"
 """
             )
 
-        subprocess.Popen(["cmd", "/k", update_bat], shell=True)
+        subprocess.Popen(f'cmd /c "{update_bat}"', shell=True)
 
         if hasattr(self, "update_window") and self.update_window.winfo_exists():
             self.update_window.destroy()
