@@ -125,6 +125,17 @@ def is_supported_archive(path: Path | str) -> bool:
     return archive_extension(Path(path)) is not None
 
 
+def normalize_archive_path(path: Path | str) -> Path:
+    """Абсолютный путь к архиву без смены диска/папки (рядом с файлом — parent)."""
+    path = Path(str(path).strip().strip('"'))
+    if path.is_file():
+        return path.absolute()
+    abs_path = Path(os.path.abspath(path))
+    if abs_path.is_file():
+        return abs_path
+    raise FileNotFoundError(f"Архив не найден: {path}")
+
+
 def unique_output_dir(parent: Path, base_name: str) -> Path:
     """Папка рядом с архивом; при коллизии — «имя 2», «имя 3» (как на macOS)."""
     candidate = parent / base_name
@@ -140,7 +151,7 @@ def unique_output_dir(parent: Path, base_name: str) -> Path:
 
 def default_extract_dir(archive_path: Path) -> Path:
     """Папка с именем архива в той же директории, что и файл."""
-    archive_path = archive_path.resolve()
+    archive_path = normalize_archive_path(archive_path)
     stem = archive_path.stem
     for ext in COMPOUND_EXTENSIONS:
         if archive_path.name.lower().endswith(ext):
@@ -181,13 +192,15 @@ def _run_7z_extract(
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
+    # Кавычки обязательны: иначе 7z обрезает путь по пробелу (C:\ROCKET APP → C:\ROCKET).
+    out_dir = os.fspath(target_dir)
     cmd = [
         tool_path,
         "x",
         "-y",
         "-bsp1",
         "-bb1",
-        f"-o{target_dir}",
+        f'-o"{out_dir}"',
         str(archive_path),
     ]
     _notify_progress(progress_callback, 0, "Распаковка…")
@@ -220,13 +233,11 @@ def extract_archive(
     target_dir: Path | str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
-    archive_path = Path(archive_path).resolve()
-    if not archive_path.is_file():
-        raise FileNotFoundError(f"Архив не найден: {archive_path}")
+    archive_path = normalize_archive_path(archive_path)
     if not is_supported_archive(archive_path):
         raise ValueError(f"Неподдерживаемый формат: {archive_path.name}")
 
-    out_dir = Path(target_dir).resolve() if target_dir else default_extract_dir(archive_path)
+    out_dir = Path(target_dir).absolute() if target_dir else default_extract_dir(archive_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ext = archive_extension(archive_path)

@@ -17,6 +17,7 @@ from archiver_core import (
     find_7z_path,
     find_icon_path,
     is_supported_archive,
+    normalize_archive_path,
     open_in_explorer,
 )
 from extract_ui import ExtractProgressDialog, extract_with_progress
@@ -27,7 +28,7 @@ from windows_assoc import (
     unregister_associations,
 )
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO_URL = "https://github.com/artbystrov/ROCKET_Archiver"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or None
 
@@ -275,9 +276,12 @@ def _archive_from_argv(argv: list[str]) -> Path | None:
     for arg in argv:
         if arg.startswith("-"):
             continue
-        path = Path(arg)
-        if path.is_file() and is_supported_archive(path):
-            return path.resolve()
+        try:
+            path = normalize_archive_path(arg)
+        except FileNotFoundError:
+            continue
+        if is_supported_archive(path):
+            return path
     return None
 
 
