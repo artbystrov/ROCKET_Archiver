@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -267,90 +268,170 @@ class Updater:
                 pass
         return os.path.join(os.path.expanduser("~"), "Desktop")
 
-    @staticmethod
-    def _cmd_path(path):
-        return os.path.abspath(path).replace("\\", "/")
-
     def _create_update_script(self, downloaded_file):
-        target_exe = self._resolve_running_exe()
+        target_exe = os.path.abspath(self._resolve_running_exe())
         app_dir = os.path.dirname(target_exe)
-        temp_dir = os.path.dirname(downloaded_file)
+        temp_dir = os.path.dirname(os.path.abspath(downloaded_file))
         desktop = self._windows_desktop_dir()
-        update_bat = os.path.join(temp_dir, "update.bat")
-        exe_name = os.path.basename(target_exe)
+        shortcut_path = os.path.join(desktop, self.desktop_shortcut_name)
 
-        new_exe = self._cmd_path(downloaded_file)
-        target = self._cmd_path(target_exe)
-        staging = self._cmd_path(target_exe + ".new")
-        work_dir = self._cmd_path(app_dir)
-        desktop_path = self._cmd_path(desktop)
-        temp = self._cmd_path(temp_dir)
-        shortcut_path = f"{desktop_path}/{self.desktop_shortcut_name}"
+        config_path = os.path.join(temp_dir, "update_config.json")
+        ps1_path = os.path.join(temp_dir, "update.ps1")
+        launcher_path = os.path.join(temp_dir, "update.bat")
 
-        with open(update_bat, "w", encoding="utf-8") as f:
+        config = {
+            "new_exe": os.path.abspath(downloaded_file),
+            "target_exe": target_exe,
+            "app_dir": app_dir,
+            "shortcut_path": shortcut_path,
+            "temp_dir": temp_dir,
+            "parent_pid": os.getpid(),
+            "app_label": self.app_label,
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+
+        ps1 = r"""$ErrorActionPreference = 'Continue'
+$ConfigPath = Join-Path -Path $PSScriptRoot -ChildPath 'update_config.json'
+$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+$NewExe = $config.new_exe
+$TargetExe = $config.target_exe
+$AppDir = $config.app_dir
+$ShortcutPath = $config.shortcut_path
+$TempDir = $config.temp_dir
+$ParentPid = [int]$config.parent_pid
+$AppLabel = $config.app_label
+$StagingExe = "$TargetExe.new"
+$BackupExe = "$TargetExe.bak"
+$LogFile = Join-Path -Path $AppDir -ChildPath 'rocket_update.log'
+
+function Write-Log {
+    param([string]$Message)
+    try {
+        "$(Get-Date -Format o) $Message" | Out-File -LiteralPath $LogFile -Append -Encoding utf8
+    } catch {}
+}
+
+function Test-FileSize {
+    param([string]$Path, [long]$ExpectedSize)
+    return (Test-Path -LiteralPath $Path) -and ((Get-Item -LiteralPath $Path).Length -eq $ExpectedSize)
+}
+
+Write-Log "=== Update start ==="
+Write-Log "NewExe=$NewExe"
+Write-Log "TargetExe=$TargetExe"
+Write-Log "ParentPid=$ParentPid"
+
+try {
+    Wait-Process -Id $ParentPid -Timeout 90 -ErrorAction SilentlyContinue
+} catch {
+    Write-Log "Wait-Process: $_"
+}
+
+$srcSize = (Get-Item -LiteralPath $NewExe).Length
+$installed = $false
+
+if (Test-Path -LiteralPath $TargetExe) {
+    try {
+        Copy-Item -LiteralPath $TargetExe -Destination $BackupExe -Force -ErrorAction Stop
+        Write-Log "Backup=$BackupExe"
+    } catch {
+        Write-Log "Backup skipped: $_"
+    }
+}
+
+for ($attempt = 1; $attempt -le 25; $attempt++) {
+    try {
+        if (Test-Path -LiteralPath $StagingExe) {
+            Remove-Item -LiteralPath $StagingExe -Force -ErrorAction SilentlyContinue
+        }
+        Copy-Item -LiteralPath $NewExe -Destination $StagingExe -Force -ErrorAction Stop
+        if (-not (Test-FileSize -Path $StagingExe -ExpectedSize $srcSize)) {
+            throw "Staging size mismatch"
+        }
+        Move-Item -LiteralPath $StagingExe -Destination $TargetExe -Force -ErrorAction Stop
+        if (Test-FileSize -Path $TargetExe -ExpectedSize $srcSize) {
+            $installed = $true
+            Write-Log "Install OK on attempt $attempt"
+            break
+        }
+        throw "Target size mismatch after move"
+    } catch {
+        Write-Log "Attempt $attempt failed: $_"
+    }
+    Start-Sleep -Seconds 2
+}
+
+if (-not $installed) {
+    Write-Log "FAILED: restoring backup if possible"
+    if (Test-Path -LiteralPath $BackupExe) {
+        try {
+            Copy-Item -LiteralPath $BackupExe -Destination $TargetExe -Force -ErrorAction Stop
+            Write-Log "Restored from backup"
+        } catch {
+            Write-Log "Restore failed: $_"
+        }
+    }
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show(
+        "Не удалось установить обновление.`n`nСкачанный файл сохранён:`n$NewExe`n`nСкопируйте его вручную в:`n$TargetExe",
+        $AppLabel,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    )
+    exit 1
+}
+
+if (Test-Path -LiteralPath $BackupExe) {
+    Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+}
+
+try {
+    if (Test-Path -LiteralPath $ShortcutPath) {
+        Remove-Item -LiteralPath $ShortcutPath -Force
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($ShortcutPath)
+    $shortcut.TargetPath = $TargetExe
+    $shortcut.WorkingDirectory = $AppDir
+    $shortcut.Save()
+    Write-Log "Shortcut=$ShortcutPath -> $TargetExe"
+} catch {
+    Write-Log "Shortcut error: $_"
+}
+
+Start-Process -LiteralPath $TargetExe -WorkingDirectory $AppDir
+Start-Sleep -Seconds 2
+
+try {
+    Remove-Item -LiteralPath $TempDir -Recurse -Force
+} catch {
+    Write-Log "Temp cleanup error: $_"
+}
+"""
+
+        with open(ps1_path, "w", encoding="utf-8-sig") as f:
+            f.write(ps1)
+
+        with open(launcher_path, "w", encoding="utf-8") as f:
             f.write(
-                f"""@echo off
-setlocal EnableDelayedExpansion
+                """@echo off
 chcp 65001 > nul
-echo Обновление {self.app_label}...
-echo Установка в: {target}
-
-set "NEW_EXE={new_exe}"
-set "TARGET_EXE={target}"
-set "STAGING_EXE={staging}"
-set "APP_DIR={work_dir}"
-set "SHORTCUT={shortcut_path}"
-
-timeout /t 2 /nobreak > nul
-
-set /a ATTEMPTS=0
-:retry_copy
-set /a ATTEMPTS+=1
-if !ATTEMPTS! gtr 20 goto copy_failed
-
-del "%STAGING_EXE%" > nul 2>&1
-copy /Y "%NEW_EXE%" "%STAGING_EXE%" > nul 2>&1
-if not exist "%STAGING_EXE%" goto wait_retry
-
-for %%F in ("%NEW_EXE%") do set SRC_SIZE=%%~zF
-for %%F in ("%STAGING_EXE%") do set DST_SIZE=%%~zF
-if not !SRC_SIZE! equ !DST_SIZE! (
-    del "%STAGING_EXE%" > nul 2>&1
-    goto wait_retry
-)
-
-move /Y "%STAGING_EXE%" "%TARGET_EXE%" > nul 2>&1
-if not exist "%TARGET_EXE%" goto wait_retry
-
-for %%F in ("%TARGET_EXE%") do set FINAL_SIZE=%%~zF
-if not !SRC_SIZE! equ !FINAL_SIZE! goto wait_retry
-goto copy_ok
-
-:wait_retry
-if !ATTEMPTS! equ 5 taskkill /f /im "{exe_name}" > nul 2>&1
-timeout /t 2 /nobreak > nul
-goto retry_copy
-
-:copy_failed
-echo.
-echo Не удалось установить обновление.
-echo Новая версия сохранена здесь: %NEW_EXE%
-echo Файл программы должен быть здесь: %TARGET_EXE%
-echo Старая версия не удалена.
-echo.
-pause
-exit /b 1
-
-:copy_ok
-del "%SHORTCUT%" > nul 2>&1
-powershell -NoProfile -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT%');$s.TargetPath='%TARGET_EXE%';$s.WorkingDirectory='%APP_DIR%';$s.Save()"
-start "" "%TARGET_EXE%"
-timeout /t 2 /nobreak > nul
-rmdir /s /q "{temp}"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0update.ps1"
 """
             )
 
-        subprocess.Popen(f'cmd /c "{update_bat}"', shell=True)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if sys.platform == "win32":
+            creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+
+        subprocess.Popen(
+            ["cmd.exe", "/c", launcher_path],
+            cwd=temp_dir,
+            creationflags=creationflags,
+            close_fds=True,
+        )
 
         if hasattr(self, "update_window") and self.update_window.winfo_exists():
             self.update_window.destroy()
